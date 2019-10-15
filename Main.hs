@@ -23,12 +23,43 @@ data Term = Var String
           | App Term Term
           deriving (Show, Eq, Ord)
 
-newtype Env = Env
-  { nameCount :: Integer
-  }
+fvar :: Term -> S.Set String
+fvar = \case
+  Var i   -> S.singleton i
+  Abs i t -> S.delete i $ fvar t
+  App e t -> S.union (fvar e) (fvar t)
 
-emptyEnv :: Env
-emptyEnv = Env 0
+bvar :: Term -> S.Set String
+bvar = \case
+  Var i   -> S.empty
+  Abs i t -> S.union (S.singleton i) (bvar t)
+  App e t -> S.union (bvar e) (bvar t)
+
+alpha :: String -> Int -> Term -> Term
+alpha s c = alpha' s False c
+  where alpha' s b c = \case
+          Var i   -> if i == s && b then Var (i ++ show c) else Var i
+          Abs i t -> if i == s then Abs (i ++ show c) (alpha' s True c t) else Abs i (alpha' s b c t)
+          App e t -> App (alpha' s b c e) (alpha' s b c t)
+
+type IS = State Int
+beta :: Term -> IS Term
+beta = \case
+  Var i   -> return $ Var i
+  Abs i t -> Abs i <$> (beta t)
+  App l r -> do
+    l' <- beta l
+    r' <- beta r
+    case l' of
+      Var i -> return $ App l' r'
+      App ll rr -> return $ App l' r'
+      Abs i t -> do
+        c <- get
+        let df = S.toList $ S.intersection (bvar t) (fvar r')
+        let cc = length df + c
+        modify (\_ -> cc)
+        let t' = foldr (\(s, c') b -> alpha s c' b) t (zip df [c..cc])
+        return $ apply t' (i, r')
 
 apply :: Term -> (String, Term) -> Term
 apply a s@(n, v) =
@@ -38,50 +69,26 @@ apply a s@(n, v) =
     App e t -> App (apply e s) (apply t s)
 
 eval :: Term -> Term
-eval = \case
-  Var i   -> Var i
-  Abs i t -> Abs i (eval t)
-  App e t ->
-    let (e', t') = (eval e, eval t) in
-    case e' of
-      Var i -> App e' t'
-      Abs i _ -> apply t' (i, t')
-      App _ _ -> App e' t'
-
-
-type IS = State Integer
-rename :: Term -> Term
-rename t = evalState (rename' (\_ -> Nothing) t) 0
-  where rename' sf t = case t of
-          Var i   -> case sf i of
-                       Just ni -> return $ Var ni
-                       Nothing -> return $ Var i
-          Abs i t -> case sf i of
-                       Just ni -> error $ "multiple abstractions of the variable " ++ i
-                       Nothing -> do
-                         c <- get
-                         modify (+1)
-                         t' <- rename' (\s -> if s == i then Just (nname i c) else sf s) t
-                         return $ Abs (nname i c) t'
-          App e t -> do
-            e' <- rename' sf e
-            t' <- rename' sf t
-            return $ App e' t'
-        nname o c = o ++ "__" ++ (show c)
+eval t = evalState (beta t) 0
 
 --------------------------------------------------------
 -- PARSER
 --------------------------------------------------------
 
-type Parser = P.Parsec String Env
+type Parser = P.Parsec String ()
+
+oparens :: Parser a -> Parser a
+oparens p = (C.char '(' >> sep) *> p <* (sep >> C.char ')')
 
 parseString :: String -> Either P.ParseError Term
-parseString s = P.runParser parseTerm emptyEnv "Main" s
+parseString s = P.runParser parseTerm () "Main" s
 
 parseTerm :: Parser Term
-parseTerm = parseAbs
-          <|> parseAbs
-          <|> parseApp
+parseTerm = P.try (oparens parseTerm')
+            <|> parseTerm'
+  where parseTerm' = parseAbs
+                     <|> parseApp
+                     <|> parseVar
 
 parseVar :: Parser Term
 parseVar = do
@@ -101,9 +108,13 @@ parseAbs = do
 
 parseApp :: Parser Term
 parseApp = P.try $ do
+  C.char '('
+  sep
   l <- parseTerm
   sep
   r <- parseTerm
+  sep
+  C.char ')'
   return $ App l r
 
 sep :: Parser ()
@@ -117,7 +128,7 @@ process :: String -> IO ()
 process s =
   case parseString s of
     Left err -> putStrLn $ "Error" ++ show err
-    Right t  -> putStrLn $ "::>" ++ show (eval $ rename t)
+    Right t  -> putStrLn $ "::> " ++ show (eval t)
 
 main :: IO ()
 main = runInputT defaultSettings loop
