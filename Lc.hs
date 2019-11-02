@@ -59,7 +59,7 @@ beta = \case
         let cc = length df + c
         modify (\_ -> cc)
         let t' = foldr (\(s, c') b -> alpha s c' b) t (zip df [c..cc])
-        return $ apply t' (i, r')
+        beta $ apply t' (i, r')
 
 apply :: Term -> (String, Term) -> Term
 apply a s@(n, v) =
